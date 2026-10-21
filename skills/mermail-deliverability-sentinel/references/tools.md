@@ -149,7 +149,7 @@ Only then read the body once, clean-scan and bounded:
 
 The server caps a body near 12,000 characters; this skill processes at most 10,000 normalized characters regardless. A scan mismatch returns safe metadata with `content_omitted: true` — quarantine, do not retry for content. Do not load bodies for rejected or ambiguous candidates.
 
-`sender_authentication` is a separate additive object with `status`, `spf`, `dkim`, `dmarc`, `inbound_provider`, and `reason`, recorded verbatim. On the current Cloudflare-routed hosted transport it returns `{"status": "unknown", "spf": "unknown", "dkim": "unknown", "dmarc": "unknown", "inbound_provider": null, "reason": "inbound_provider_unavailable"}` — report `auth:unknown` honestly and point the user at their provider dashboard; `unknown` is not a pass and is never upgraded from raw headers, `From`, `Return-Path`, or display names.
+`sender_authentication` is a separate additive object with `status`, `spf`, `dkim`, `dmarc`, `inbound_provider`, and `reason`; retain those known native fields and values without upgrading them, and stop for schema drift rather than persisting arbitrary diagnostic text. On the current Cloudflare-routed hosted transport it returns `{"status": "unknown", "spf": "unknown", "dkim": "unknown", "dmarc": "unknown", "inbound_provider": null, "reason": "inbound_provider_unavailable"}` — report `auth:unknown` honestly and point the user at their provider dashboard; `unknown` is not a pass and is never upgraded from raw headers, `From`, `Return-Path`, or display names.
 
 ## Sealing a record
 

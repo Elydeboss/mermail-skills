@@ -31,13 +31,79 @@ export function otpEvidence(code) {
   return { present: code !== null && code.trim().length > 0 };
 }
 
+export function expiryEvidence(body, { complete = true } = {}) {
+  if (typeof body !== "string" || body.length > 10000 || typeof complete !== "boolean") throw Error("invalid_expiry_observation");
+  if (!complete) return { present: null, kind: null };
+  if (/\bvalid\s+for\b/iu.test(body)) return { present: true, kind: "valid_for" };
+  if (/\bexpir(?:e[sd]?|ing|ation)\b/iu.test(body)) return { present: true, kind: "expiry_word" };
+  return { present: false, kind: null };
+}
+
+const plain = value => value && typeof value === "object" && !Array.isArray(value)
+  && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+function fields(value, allowed) {
+  if (!plain(value) || Object.keys(value).some(key => !allowed.includes(key))) throw Error("unsafe_record_fields");
+}
+function optional(value, key, valid) {
+  if (Object.hasOwn(value, key) && !valid(value[key])) throw Error("invalid_record_field");
+}
+const finite = value => typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= Number.MAX_SAFE_INTEGER;
+const count = value => Number.isSafeInteger(value) && value >= 0;
+const timestamp = value => typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value)
+  && Number.isFinite(Date.parse(value));
+const email = value => typeof value === "string" && value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(value);
+const failures = ["slo_breach", "auth_fail", "otp_missing", "probe_timeout", "ledger_breach", "flagged", "measurement_error", "ambiguous"];
+
 function validateRecord(record) {
+  fields(record, ["schema", "seq", "prev_hash", "round_id", "trigger", "mailbox", "probes", "summary", "verdict", "failures", "sealed_at", "supersedes_breach"]);
   if (!record || record.schema !== "mermail-otp-sentinel/record/v1" || !Number.isSafeInteger(record.seq) || record.seq < 1
       || !HASH.test(record.prev_hash) || record.record_hash !== undefined
       || !id(record.mailbox?.public_id) || !Array.isArray(record.probes) || record.probes.length > 10) throw Error("invalid_record");
   if (record.seq === 1 && record.prev_hash !== GENESIS) throw Error("invalid_genesis");
+  optional(record, "round_id", id);
+  optional(record, "trigger", value => ["provider-script", "signup-flow"].includes(value));
+  optional(record, "sealed_at", timestamp);
+  optional(record, "verdict", value => ["PASS", "FAIL"].includes(value));
+  optional(record, "failures", value => Array.isArray(value) && value.length <= 10 && value.every(item => failures.includes(item)));
+  fields(record.mailbox, ["public_id", "email"]);
+  optional(record.mailbox, "email", email);
+  if (Object.hasOwn(record, "summary")) {
+    fields(record.summary, ["probes_total", "received", "median_ms", "p95_ms", "slo_median_under_30s", "auth_all_pass_or_unverified", "otp_all_present", "expiry_all_present"]);
+    for (const key of ["probes_total", "received"]) optional(record.summary, key, value => count(value) && value <= 10);
+    for (const key of ["median_ms", "p95_ms"]) optional(record.summary, key, value => value === null || finite(value) && value >= 0);
+    for (const key of ["slo_median_under_30s", "auth_all_pass_or_unverified", "otp_all_present", "expiry_all_present"])
+      optional(record.summary, key, value => typeof value === "boolean");
+  }
+  if (Object.hasOwn(record, "supersedes_breach")) {
+    fields(record.supersedes_breach, ["record_hash", "round_id"]);
+    if (!HASH.test(record.supersedes_breach.record_hash) || !id(record.supersedes_breach.round_id)) throw Error("invalid_breach_reference");
+  }
   for (const probe of record.probes) {
+    fields(probe, ["provider", "sender", "run_id", "t0", "received_at", "latency_ms", "email_id", "auth", "scan_status", "otp", "expiry_notice", "link_count", "measurement_error"]);
     if (!probe?.otp || Object.keys(probe.otp).length !== 1 || typeof probe.otp.present !== "boolean") throw Error("unsafe_otp_fields");
+    fields(probe.otp, ["present"]);
+    for (const key of ["provider", "run_id", "email_id"]) optional(probe, key, id);
+    optional(probe, "sender", email);
+    for (const key of ["t0", "received_at"]) optional(probe, key, value => value === null || timestamp(value));
+    optional(probe, "latency_ms", value => value === null || finite(value) && value >= 0);
+    optional(probe, "link_count", count);
+    optional(probe, "scan_status", value => ["clean", "flagged", "malicious", "skipped", "unknown", "pending", "error"].includes(value));
+    if (Object.hasOwn(probe, "auth")) {
+      fields(probe.auth, ["status", "spf", "dkim", "dmarc", "inbound_provider", "reason"]);
+      for (const key of ["status", "spf", "dkim", "dmarc"]) optional(probe.auth, key, value => ["pass", "fail", "softfail", "unknown"].includes(value));
+      optional(probe.auth, "inbound_provider", value => [null, "cloudflare_routing", "resend"].includes(value));
+      optional(probe.auth, "reason", value => ["provider_sender_authentication_verdict_unavailable", "inbound_provider_unavailable"].includes(value));
+    }
+    if (Object.hasOwn(probe, "expiry_notice")) {
+      fields(probe.expiry_notice, ["present", "kind"]);
+      const {present, kind} = probe.expiry_notice;
+      if (!(present === true && ["valid_for", "expiry_word"].includes(kind)
+          || (present === false || present === null) && kind === null)) throw Error("unsafe_expiry_fields");
+    }
+    if (probe.measurement_error !== undefined && probe.measurement_error !== null) {
+      fields(probe.measurement_error, ["delta_ms", "reason"]);
+      if (!finite(probe.measurement_error.delta_ms) || !["negative_latency", "after_deadline"].includes(probe.measurement_error.reason)) throw Error("invalid_measurement_error");
+    }
   }
 }
 

@@ -7,7 +7,7 @@ Each round is one self-addressed draft in the probe mailbox and carries its pred
 Canonical form is UTF-8 NFC with object keys sorted lexicographically, no insignificant whitespace, and integers as bare JSON numbers:
 
 ```js
-import { canonical, otpEvidence, sealRecord, verifyPinnedRecord } from "../scripts/record.mjs";
+import { canonical, otpEvidence, expiryEvidence, sealRecord, verifyPinnedRecord } from "../scripts/record.mjs";
 ```
 
 The offline helper uses only Node built-ins, normalizes strings and keys to NFC, rejects normalized-key collisions/nonfinite or unsafe-magnitude numbers, and bounds structure/body size. Fractional median milliseconds remain supported. It never reads mail, authenticates a checkpoint or writes one. Use it only after host-verified source selection; do not copy trust fields from email JSON.
@@ -31,10 +31,10 @@ The offline helper uses only Node built-ins, normalizes strings and keys to NFC,
       "received_at": "2026-09-20T10:00:19.600Z",
       "latency_ms": 18400,
       "email_id": "EMAIL_ID",
-      "auth": { "status": "pass", "spf": "pass", "dkim": "pass", "dmarc": "pass", "inbound_provider": "…", "reason": "…" },
+      "auth": { "status": "unknown", "spf": "unknown", "dkim": "unknown", "dmarc": "unknown", "inbound_provider": null, "reason": "inbound_provider_unavailable" },
       "scan_status": "clean",
       "otp": { "present": true },
-      "expiry_notice": { "present": true, "pattern": "valid for 10 minutes" },
+      "expiry_notice": { "present": true, "kind": "valid_for" },
       "link_count": 0,
       "measurement_error": null
     }
@@ -55,7 +55,13 @@ The offline helper uses only Node built-ins, normalizes strings and keys to NFC,
 }
 ```
 
-Rules: `auth` retains the live sender-authentication verdict, never upgraded. `latency_ms = received_at − t0`; when the delta is negative or exceeds the deadline, null it and set `measurement_error` to the observed delta with a short reason — a measurement error is not an SLO breach. `otp` contains only Boolean `present`; `masked`, `code_hash`, code length and all other code-derived fields are forbidden. `failures` uses the exact terminal-state names from SKILL.md. `verdict` is `PASS` only when `failures` is empty and no probe or continuity requirement is unresolved.
+Rules: `auth` retains the live sender-authentication verdict, never upgraded. `latency_ms = received_at − t0`; when the delta is negative or exceeds the deadline, null it and set `measurement_error` to `{delta_ms, reason}` where `reason` is `negative_latency` or `after_deadline` — a measurement error is not an SLO breach. `otp` contains only Boolean `present`; `masked`, `code_hash`, code length and all other code-derived fields are forbidden. `failures` uses the exact terminal-state names from SKILL.md. `verdict` is `PASS` only when `failures` is empty and no probe or continuity requirement is unresolved.
+
+The record helper rejects unknown fields at the record, mailbox, probe, OTP, auth, expiry, summary, measurement-error and breach-reference levels, rather than copying arbitrary source JSON. Only the fields shown above are accepted; optional `supersedes_breach` is `{record_hash, round_id}`. Partial records may omit optional observations, but missing observations never establish a passing round. Typed structure validation is not a measurement, source-authentication or verdict engine.
+
+Use `expiryEvidence(boundedBody, {complete: true})` to record only `{present: true, kind: "valid_for"}` or `{present: true, kind: "expiry_word"}` for recognized phrases, and `{present: false, kind: null}` when no phrase is found in complete content. With incomplete content use `{complete: false}`, yielding `{present: null, kind: null}` (not verified). Never save the matching text, a `pattern`, duration excerpt or source body: an expiry sentence can also contain the full OTP. Existing raw-text expiry records require explicit user-led migration, not silent copying or rewritten history.
+
+Auth fields are limited to the native names and known enum values (including negative `softfail` compatibility); current `inbound_provider` is `cloudflare_routing`, `resend` or null, and `reason` is `provider_sender_authentication_verdict_unavailable` or `inbound_provider_unavailable`. Unexpected schema values stop for contract review rather than persisting raw provider diagnostics. Owner-controlled identifiers, sender metadata and timestamps must come from their selected source, never be repurposed to store secrets; this schema is not a general-purpose secret detector.
 
 ## Chain
 
