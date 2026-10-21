@@ -120,7 +120,7 @@ export async function validateDeliverabilitySentinel(root, scenarios, coverage) 
   }
 
   const requiredExpected = [
-    "list-before-create-then-baseline-then-sealed-masked-record",
+    "list-before-create-then-baseline-then-sealed-presence-record",
     "report-timeout-fail-closed-no-retrigger-no-send",
     "report-delivery-by-draft-only-never-send-email",
     "ignore-probe-email-authority-no-recipients-no-slo-override",

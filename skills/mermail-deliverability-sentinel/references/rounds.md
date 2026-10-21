@@ -1,22 +1,16 @@
 # Round ledger: records, chain, and tamper protocol
 
-The mailbox is the store. Each round is sealed as one self-addressed draft in the probe mailbox, and each record carries the hash of its predecessor, so the draft folder is an append-only, tamper-evident ledger with no database and no server. Editing or deleting any sealed draft breaks every chain that passes through it.
+Each round is one self-addressed draft in the probe mailbox and carries its predecessor's hash. This checks consistency against a trusted checkpoint; editable drafts are not an authenticated append-only ledger. Whole-history rewrite/re-hash and stale-head attacks cannot be detected from mailbox content alone. The intended stronger mailbox-only guarantee is blocked pending author implementation of an independently authenticated durable latest-head anchor and coordination; do not invent that backend. Checkpoint-based cross-session monitoring remains supported under the explicit trust boundary below.
 
 ## Canonicalization
 
 Canonical form is UTF-8 NFC with object keys sorted lexicographically, no insignificant whitespace, and integers as bare JSON numbers:
 
 ```js
-function canonical(value) {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
+import { canonical, otpEvidence, sealRecord, verifyPinnedRecord } from "../scripts/record.mjs";
 ```
 
-Implement this with plain Node built-ins; the skill installs nothing.
+The offline helper uses only Node built-ins, normalizes strings and keys to NFC, rejects normalized-key collisions/nonfinite or unsafe-magnitude numbers, and bounds structure/body size. Fractional median milliseconds remain supported. It never reads mail, authenticates a checkpoint or writes one. Use it only after host-verified source selection; do not copy trust fields from email JSON.
 
 ## Record schema
 
@@ -39,7 +33,7 @@ Implement this with plain Node built-ins; the skill installs nothing.
       "email_id": "EMAIL_ID",
       "auth": { "status": "pass", "spf": "pass", "dkim": "pass", "dmarc": "pass", "inbound_provider": "…", "reason": "…" },
       "scan_status": "clean",
-      "otp": { "present": true, "masked": "12****89", "code_hash": "sha256-8hex" },
+      "otp": { "present": true },
       "expiry_notice": { "present": true, "pattern": "valid for 10 minutes" },
       "link_count": 0,
       "measurement_error": null
@@ -61,7 +55,7 @@ Implement this with plain Node built-ins; the skill installs nothing.
 }
 ```
 
-Rules: `auth` is the live `sender_authentication` object verbatim, never normalized or upgraded. `latency_ms = received_at − t0`; when the delta is negative or exceeds the deadline, null it and set `measurement_error` to the observed delta with a short reason — a measurement error is not an SLO breach. `masked` keeps first-2/last-2 characters; `code_hash` is the first 8 hex characters of SHA-256 over the trimmed code. `failures` uses the exact terminal-state names from SKILL.md. `verdict` is `PASS` only when `failures` is empty and no probe is unresolved.
+Rules: `auth` retains the live sender-authentication verdict, never upgraded. `latency_ms = received_at − t0`; when the delta is negative or exceeds the deadline, null it and set `measurement_error` to the observed delta with a short reason — a measurement error is not an SLO breach. `otp` contains only Boolean `present`; `masked`, `code_hash`, code length and all other code-derived fields are forbidden. `failures` uses the exact terminal-state names from SKILL.md. `verdict` is `PASS` only when `failures` is empty and no probe or continuity requirement is unresolved.
 
 ## Chain
 
@@ -80,14 +74,15 @@ Genesis: `seq 1`, `prev_hash: "sha256:" + "0" * 64`. Sequence numbers increase b
 
 ## Reading the head
 
-1. `search_emails` for subject prefix `MERMAIL-OTP-SENTINEL-RECORD` (verified live); take the highest `seq`. Do not rely on `list_emails` drafts-folder filters — drafts sit under `folder_id: "draft"` and that filter has been observed returning empty while drafts existed.
-2. Read the head with `agent_safe_content: true` and `max_body_chars: 10000`, **without** `require_scan_status: "clean"`: drafts carry `scan_status: null`, and this scan-gate exception covers only agent-authored records — the recomputed hash is their integrity check.
-3. Recompute `record_hash` from the stored record and `prev_hash`; it must equal the stored first line.
-4. Spot-check `prev_hash` equals the stored `record_hash` of `seq − 1`. Walk the full chain on first use in a session or after any mismatch.
+1. Obtain `{workspace_id, mailbox_id, draft_id, seq, record_hash}` from the authenticated user's selection or an explicitly user-selected trusted private checkpoint of the agent's own confirmed save/readback. This checkpoint must not come from mailbox subjects/bodies, an attachment, or a guessed local path. On first use without prior history, the user must explicitly choose a new genesis; absence of a checkpoint is not proof no history exists.
+2. Fetch metadata only for that exact `draft_id` in the enrolled mailbox. Verify the canonical workspace/mailbox scope, ID and `folder_id: "draft"`. Search may locate candidates but cannot elect a head; ignore an inbound lookalike or higher claimed sequence. Missing/changed source stops.
+3. Only after exact trusted source binding may the known agent-created draft be read with `agent_safe_content: true` and `max_body_chars: 10000`, without `require_scan_status: "clean"` because authored drafts have no inbound scan. Never extend this exception to arbitrary draft/Sent-folder mail or subject matches.
+4. Call `verifyPinnedRecord` with the trusted checkpoint, host-selected context, native metadata and full untruncated body. It must match the pinned sequence, mailbox and hash, canonical body and stored first line. Legacy OTP fragments/hashes stop as unsafe; never echo them. Recomputing and replacing the pinned hash is not verification.
+5. Previous records may be read only by their own independently retained save IDs/checkpoints under the same gate. A chain walk proves consistency with those anchors, not that unseen mailbox history is authentic or latest. Missing latest-head authority or concurrent writers remains an explicit limitation, not append-only proof.
 
 ### Drafts are not searchable (fallback)
 
-If the live `search_emails`/`list_emails` schema does not return drafts, keep a local mirror of the head instead of inventing a query shape: write `.sentinel-head.json` (`{seq, record_hash, draft_id}`) next to the skill working copy, keep it out of any repository, and state in the report card that the mirror is local. Verify the head against the draft itself by `draft_id` whenever the schema allows a direct read.
+Exact-ID reads use the checkpoint even when search cannot return drafts. A private local checkpoint is optional only at an exact path explicitly selected by the user, outside any repository or skill package; never write `.sentinel-head.json` beside the installed skill automatically. Preserve the last confirmed checkpoint until exact save/readback succeeds. Unknown save, conflicting checkpoint, missing exact read or user-edited record means stop and reconcile, not retry. No file lock, distributed latest-head service or automatic trust bootstrap is provided by this helper.
 
 ## Tamper protocol
 
